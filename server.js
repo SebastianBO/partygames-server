@@ -9,22 +9,20 @@
  * - Automatic cleanup of disconnected players
  */
 
+const http = require('http');
 const WebSocket = require('ws');
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 const PLAYERS_PER_GAME = 4;
-const TICK_RATE = 20; // 20 updates per second
-const GAME_TIMEOUT = 120000; // 2 minutes max game time
+const TICK_RATE = 20;
+const GAME_TIMEOUT = 120000;
 
 // Message types
 const MSG = {
-    // Client -> Server
     JOIN_QUEUE: 'join_queue',
     LEAVE_QUEUE: 'leave_queue',
     PLAYER_INPUT: 'player_input',
     READY: 'ready',
-
-    // Server -> Client
     QUEUE_STATUS: 'queue_status',
     MATCH_FOUND: 'match_found',
     GAME_START: 'game_start',
@@ -34,26 +32,16 @@ const MSG = {
     ERROR: 'error'
 };
 
-// Minigame types (must match iOS client)
 const MINIGAMES = [
-    'bumper_balls',
-    'hot_rope_jump',
-    'mushroom_mixup',
-    'snowball_summit',
-    'shy_guy_says',
-    'bombs_away',
-    'pushy_penguins',
-    'hexagon_heat',
-    'bounce_trounce',
-    'coin_block_blitz',
-    'burnstile'
+    'bumper_balls', 'hot_rope_jump', 'mushroom_mixup', 'snowball_summit',
+    'shy_guy_says', 'bombs_away', 'pushy_penguins', 'hexagon_heat',
+    'bounce_trounce', 'coin_block_blitz', 'burnstile'
 ];
 
 // Server state
 const matchmakingQueue = [];
 const activeGames = new Map();
 const playerSessions = new Map();
-
 let gameIdCounter = 1;
 
 class Player {
@@ -84,27 +72,19 @@ class Game {
         this.players = players;
         this.minigameType = minigameType;
         this.minigameName = MINIGAMES[minigameType];
-        this.state = 'waiting'; // waiting, countdown, playing, ended
+        this.state = 'waiting';
         this.tick = 0;
         this.timer = 60;
         this.countdown = 3;
-        this.startTime = null;
         this.randomSeed = Math.floor(Math.random() * 1000000);
 
-        // Assign player indices
         players.forEach((player, index) => {
             player.gameId = this.id;
             player.playerIndex = index;
             player.alive = true;
             player.score = 0;
-
-            // Starting positions (circle formation)
             const angle = (index / players.length) * Math.PI * 2;
-            player.position = {
-                x: Math.cos(angle) * 3,
-                y: 0.5,
-                z: Math.sin(angle) * 3
-            };
+            player.position = { x: Math.cos(angle) * 3, y: 0.5, z: Math.sin(angle) * 3 };
             player.velocity = { x: 0, y: 0, z: 0 };
         });
     }
@@ -119,13 +99,8 @@ class Game {
             timer: this.timer,
             state: this.state,
             players: this.players.map(p => ({
-                id: p.id,
-                index: p.playerIndex,
-                username: p.username,
-                alive: p.alive,
-                score: p.score,
-                position: p.position,
-                velocity: p.velocity
+                id: p.id, index: p.playerIndex, username: p.username,
+                alive: p.alive, score: p.score, position: p.position, velocity: p.velocity
             }))
         };
     }
@@ -133,24 +108,16 @@ class Game {
     start() {
         this.state = 'countdown';
         this.countdown = 3;
-        this.startTime = Date.now();
 
         this.broadcast(MSG.GAME_START, {
             gameId: this.id,
             minigame: this.minigameName,
             minigameType: this.minigameType,
             seed: this.randomSeed,
-            players: this.players.map(p => ({
-                id: p.id,
-                index: p.playerIndex,
-                username: p.username
-            }))
+            players: this.players.map(p => ({ id: p.id, index: p.playerIndex, username: p.username }))
         });
 
-        // Start game loop
         this.interval = setInterval(() => this.update(), 1000 / TICK_RATE);
-
-        // Game timeout
         this.timeout = setTimeout(() => this.end('timeout'), GAME_TIMEOUT);
     }
 
@@ -166,25 +133,17 @@ class Game {
         } else if (this.state === 'playing') {
             this.timer -= 1 / TICK_RATE;
 
-            // Update physics (simplified - clients do their own physics)
             this.players.forEach(player => {
                 if (!player.alive) return;
-
-                // Apply input
                 const input = player.lastInput;
                 player.velocity.x += input.x * 0.5;
                 player.velocity.z += input.z * 0.5;
-
-                // Friction
                 player.velocity.x *= 0.95;
                 player.velocity.z *= 0.95;
-
-                // Update position
                 player.position.x += player.velocity.x * (1 / TICK_RATE);
                 player.position.z += player.velocity.z * (1 / TICK_RATE);
             });
 
-            // Check win conditions
             const alivePlayers = this.players.filter(p => p.alive);
             if (alivePlayers.length <= 1 || this.timer <= 0) {
                 this.end('normal');
@@ -192,13 +151,11 @@ class Game {
             }
         }
 
-        // Broadcast state
         this.broadcast(MSG.GAME_STATE, this.getState());
     }
 
     handleInput(player, input) {
         if (this.state !== 'playing' || !player.alive) return;
-
         player.lastInput = {
             x: Math.max(-1, Math.min(1, input.x || 0)),
             z: Math.max(-1, Math.min(1, input.z || 0)),
@@ -210,16 +167,10 @@ class Game {
     removePlayer(player) {
         player.alive = false;
         player.gameId = null;
-
-        this.broadcast(MSG.PLAYER_LEFT, {
-            playerId: player.id,
-            playerIndex: player.playerIndex
-        });
+        this.broadcast(MSG.PLAYER_LEFT, { playerId: player.id, playerIndex: player.playerIndex });
 
         const remaining = this.players.filter(p => p.alive && p.ws.readyState === WebSocket.OPEN);
-        if (remaining.length < 2) {
-            this.end('disconnect');
-        }
+        if (remaining.length < 2) this.end('disconnect');
     }
 
     end(reason) {
@@ -229,41 +180,55 @@ class Game {
         clearInterval(this.interval);
         clearTimeout(this.timeout);
 
-        // Calculate placements
         const placements = this.players
             .filter(p => p.ws.readyState === WebSocket.OPEN)
-            .sort((a, b) => {
-                if (a.alive !== b.alive) return b.alive - a.alive;
-                return b.score - a.score;
-            })
+            .sort((a, b) => (b.alive - a.alive) || (b.score - a.score))
             .map((p, i) => ({ playerId: p.id, placement: i + 1, score: p.score }));
 
-        this.broadcast(MSG.GAME_END, {
-            reason,
-            placements
-        });
+        this.broadcast(MSG.GAME_END, { reason, placements });
 
-        // Cleanup
-        this.players.forEach(p => {
-            p.gameId = null;
-            p.playerIndex = -1;
-        });
-
+        this.players.forEach(p => { p.gameId = null; p.playerIndex = -1; });
         activeGames.delete(this.id);
         console.log(`[Game ${this.id}] Ended: ${reason}`);
     }
 }
 
-// WebSocket server
-const wss = new WebSocket.Server({ port: PORT });
+// HTTP server for health checks
+const httpServer = http.createServer((req, res) => {
+    if (req.url === '/health') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+            status: 'ok',
+            playersInQueue: matchmakingQueue.length,
+            activeGames: activeGames.size,
+            connectedPlayers: playerSessions.size
+        }));
+    } else {
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end(`
+            <html>
+            <head><title>Party Games Server</title></head>
+            <body style="font-family: system-ui; padding: 40px; background: #1a1a2e; color: white;">
+                <h1>Party Games Server</h1>
+                <p>WebSocket endpoint: <code>ws://${req.headers.host}</code></p>
+                <h3>Status</h3>
+                <ul>
+                    <li>Players in queue: ${matchmakingQueue.length}</li>
+                    <li>Active games: ${activeGames.size}</li>
+                    <li>Connected players: ${playerSessions.size}</li>
+                </ul>
+            </body>
+            </html>
+        `);
+    }
+});
 
-console.log(`Party Games Server running on port ${PORT}`);
-console.log(`Waiting for players...`);
+// WebSocket server (share HTTP server)
+const wss = new WebSocket.Server({ server: httpServer });
 
 wss.on('connection', (ws) => {
     const player = new Player(ws);
     playerSessions.set(ws, player);
-
     console.log(`[${player.id}] Connected`);
 
     ws.on('message', (data) => {
@@ -281,28 +246,19 @@ wss.on('connection', (ws) => {
         playerSessions.delete(ws);
     });
 
-    ws.on('error', (err) => {
-        console.error(`[${player.id}] Error:`, err.message);
-    });
+    ws.on('error', (err) => console.error(`[${player.id}] Error:`, err.message));
 });
 
 function handleMessage(player, msg) {
     switch (msg.type) {
-        case MSG.JOIN_QUEUE:
-            joinQueue(player, msg.username);
-            break;
-
-        case MSG.LEAVE_QUEUE:
-            leaveQueue(player);
-            break;
-
+        case MSG.JOIN_QUEUE: joinQueue(player, msg.username); break;
+        case MSG.LEAVE_QUEUE: leaveQueue(player); break;
         case MSG.PLAYER_INPUT:
             if (player.gameId) {
                 const game = activeGames.get(player.gameId);
                 if (game) game.handleInput(player, msg);
             }
             break;
-
         case MSG.READY:
             player.ready = true;
             checkAllReady(player);
@@ -311,12 +267,10 @@ function handleMessage(player, msg) {
 }
 
 function joinQueue(player, username) {
-    if (matchmakingQueue.includes(player)) return;
-    if (player.gameId) return;
+    if (matchmakingQueue.includes(player) || player.gameId) return;
 
     player.username = username || player.username;
     matchmakingQueue.push(player);
-
     console.log(`[${player.id}] Joined queue as "${player.username}" (${matchmakingQueue.length}/${PLAYERS_PER_GAME})`);
 
     broadcastQueueStatus();
@@ -352,84 +306,37 @@ function tryStartMatch() {
 
         console.log(`[Game ${game.id}] Created - ${MINIGAMES[minigameType]} with ${players.map(p => p.username).join(', ')}`);
 
-        // Notify players
         players.forEach(player => {
             player.send(MSG.MATCH_FOUND, {
                 gameId: game.id,
                 minigame: game.minigameName,
-                players: players.map(p => ({
-                    id: p.id,
-                    index: p.playerIndex,
-                    username: p.username
-                }))
+                players: players.map(p => ({ id: p.id, index: p.playerIndex, username: p.username }))
             });
         });
 
-        // Start after brief delay
-        setTimeout(() => {
-            if (game.state === 'waiting') {
-                game.start();
-            }
-        }, 2000);
+        setTimeout(() => { if (game.state === 'waiting') game.start(); }, 2000);
     }
 }
 
 function checkAllReady(player) {
     if (!player.gameId) return;
-
     const game = activeGames.get(player.gameId);
     if (!game || game.state !== 'waiting') return;
-
-    const allReady = game.players.every(p => p.ready);
-    if (allReady) {
-        game.start();
-    }
+    if (game.players.every(p => p.ready)) game.start();
 }
 
 function handleDisconnect(player) {
-    // Remove from queue
     leaveQueue(player);
-
-    // Remove from active game
     if (player.gameId) {
         const game = activeGames.get(player.gameId);
-        if (game) {
-            game.removePlayer(player);
-        }
+        if (game) game.removePlayer(player);
     }
 }
 
-// Health check endpoint for Coolify
-const http = require('http');
-const healthServer = http.createServer((req, res) => {
-    if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({
-            status: 'ok',
-            playersInQueue: matchmakingQueue.length,
-            activeGames: activeGames.size,
-            connectedPlayers: playerSessions.size
-        }));
-    } else {
-        res.writeHead(200, { 'Content-Type': 'text/html' });
-        res.end(`
-            <html>
-            <head><title>Party Games Server</title></head>
-            <body style="font-family: system-ui; padding: 40px; background: #1a1a2e; color: white;">
-                <h1>Party Games Server</h1>
-                <p>WebSocket endpoint: <code>ws://${req.headers.host}</code></p>
-                <h3>Status</h3>
-                <ul>
-                    <li>Players in queue: ${matchmakingQueue.length}</li>
-                    <li>Active games: ${activeGames.size}</li>
-                    <li>Connected players: ${playerSessions.size}</li>
-                </ul>
-            </body>
-            </html>
-        `);
-    }
-});
-
-healthServer.listen(3000, () => {
-    console.log(`Health check server on port 3000`);
+// Start server
+httpServer.listen(PORT, () => {
+    console.log(`Party Games Server running on port ${PORT}`);
+    console.log(`HTTP: http://localhost:${PORT}`);
+    console.log(`WebSocket: ws://localhost:${PORT}`);
+    console.log(`Health check: http://localhost:${PORT}/health`);
 });
